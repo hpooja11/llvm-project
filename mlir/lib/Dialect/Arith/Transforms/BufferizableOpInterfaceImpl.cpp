@@ -97,9 +97,9 @@ struct IndexCastOpInterface
 
     if (shape.size() > 0) {
       // Create a memref type for the result
-      auto indexType = rewriter.getIndexType();
+      auto resultElementType = resultTensorType.getElementType();
       SmallVector<int64_t, 4> resultShape(shape.begin(), shape.end());
-      auto resultMemRef = MemRefType::get(shape, indexType);
+      auto resultMemRef = MemRefType::get(shape, resultElementType);
 
       // Handling dynamic dimensions
       SmallVector<Value, 4> dynamicSizes;
