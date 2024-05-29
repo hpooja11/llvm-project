@@ -172,7 +172,7 @@ struct IndexCastOpInterface
       SmallVector<Value, 4> indices;
       createNestedLoops(rewriter, op->getLoc(), indices, 0);
       replaceOpWithNewBufferizedOp<arith::IndexCastOp>(rewriter, op,
-                                                       resultMemRef, alloc);
+                                                       resultMemRef, *source);
     } else {
       // Result type should have same layout and address space as the source
       // type.
