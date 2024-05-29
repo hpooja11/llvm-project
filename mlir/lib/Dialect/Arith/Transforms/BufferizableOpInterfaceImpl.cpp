@@ -11,6 +11,7 @@
 #include "mlir/Dialect/Bufferization/IR/BufferizableOpInterface.h"
 #include "mlir/Dialect/Bufferization/Transforms/BufferUtils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/Operation.h"
@@ -91,21 +92,104 @@ struct IndexCastOpInterface
     if (failed(source))
       return failure();
     auto sourceType = cast<BaseMemRefType>(source->getType());
+    auto shape = sourceType.getShape();
+    int64_t rank = shape.size();
 
-    // Result type should have same layout and address space as the source type.
-    BaseMemRefType resultType;
-    if (auto rankedMemRefType = dyn_cast<MemRefType>(sourceType)) {
-      resultType = MemRefType::get(
-          rankedMemRefType.getShape(), resultTensorType.getElementType(),
-          rankedMemRefType.getLayout(), rankedMemRefType.getMemorySpace());
+    if (shape.size() > 0) {
+      // Create a memref type for the result
+      auto indexType = rewriter.getIndexType();
+      SmallVector<int64_t, 4> resultShape(shape.begin(), shape.end());
+      auto resultMemRef = MemRefType::get(shape, indexType);
+
+      // Handling dynamic dimensions
+      SmallVector<Value, 4> dynamicSizes;
+      for (int64_t dim = 0; dim < rank; ++dim) {
+        if (shape[dim] == ShapedType::kDynamic) {
+          // Get dynamic size of the dimension
+          Value dimSize =
+              rewriter.create<memref::DimOp>(op->getLoc(), *source, dim);
+          dynamicSizes.push_back(dimSize);
+        }
+      }
+
+      Value alloc;
+      if (dynamicSizes.empty())
+        alloc = rewriter.create<memref::AllocOp>(op->getLoc(), resultMemRef);
+      else
+        alloc = rewriter.create<memref::AllocOp>(op->getLoc(), resultMemRef,
+                                                 dynamicSizes);
+
+      // Constant for loop bounds
+      SmallVector<Value, 4> lowerBounds(
+          rank, rewriter.create<arith::ConstantIndexOp>(op->getLoc(), 0));
+      SmallVector<Value, 4> upperBounds;
+      SmallVector<Value, 4> steps(
+          rank, rewriter.create<arith::ConstantIndexOp>(op->getLoc(), 1));
+
+      for (int64_t dim = 0; dim < rank; ++dim) {
+        if (shape[dim] == ShapedType::kDynamic) {
+          Value dimSize =
+              rewriter.create<memref::DimOp>(op->getLoc(), *source, dim);
+          upperBounds.push_back(dimSize);
+        } else {
+          upperBounds.push_back(rewriter.create<arith::ConstantIndexOp>(
+              op->getLoc(), shape[dim]));
+        }
+      }
+
+      // Function to create nested loops
+      std::function<void(OpBuilder &, Location, SmallVector<Value, 4> &,
+                         int64_t)>
+          createNestedLoops;
+      createNestedLoops = [&](OpBuilder &nestedBuilder, Location loc,
+                              SmallVector<Value, 4> &indices, int64_t depth) {
+        if (depth == rank) {
+          // Base case: all dimensions are handled
+          Value elem =
+              nestedBuilder.create<memref::LoadOp>(loc, *source, indices);
+
+          // Cast the element to the result type
+          Value casted = nestedBuilder.create<arith::IndexCastOp>(
+              loc, resultTensorType.getElementType(), elem);
+
+          // Store the casted element into the result memref
+          nestedBuilder.create<memref::StoreOp>(loc, casted, alloc, indices);
+        } else {
+          Value lb = lowerBounds[depth];
+          Value ub = upperBounds[depth];
+          Value step = steps[depth];
+          nestedBuilder.create<scf::ForOp>(
+              loc, lb, ub, step, ValueRange{},
+              [&](OpBuilder &innerBuilder, Location innerLoc, Value iv,
+                  ValueRange) {
+                indices.push_back(iv);
+                createNestedLoops(innerBuilder, innerLoc, indices, depth + 1);
+                indices.pop_back();
+                innerBuilder.create<scf::YieldOp>(innerLoc);
+              });
+        }
+      };
+      SmallVector<Value, 4> indices;
+      createNestedLoops(rewriter, op->getLoc(), indices, 0);
+      replaceOpWithNewBufferizedOp<arith::IndexCastOp>(rewriter, op,
+                                                       resultMemRef, alloc);
     } else {
-      auto unrankedMemrefType = cast<UnrankedMemRefType>(sourceType);
-      resultType = UnrankedMemRefType::get(resultTensorType.getElementType(),
-                                           unrankedMemrefType.getMemorySpace());
+      // Result type should have same layout and address space as the source
+      // type.
+      BaseMemRefType resultType;
+      if (auto rankedMemRefType = dyn_cast<MemRefType>(sourceType)) {
+        resultType = MemRefType::get(
+            rankedMemRefType.getShape(), resultTensorType.getElementType(),
+            rankedMemRefType.getLayout(), rankedMemRefType.getMemorySpace());
+      } else {
+        auto unrankedMemrefType = cast<UnrankedMemRefType>(sourceType);
+        resultType =
+            UnrankedMemRefType::get(resultTensorType.getElementType(),
+                                    unrankedMemrefType.getMemorySpace());
+      }
+      replaceOpWithNewBufferizedOp<arith::IndexCastOp>(rewriter, op, resultType,
+                                                       *source);
     }
-
-    replaceOpWithNewBufferizedOp<arith::IndexCastOp>(rewriter, op, resultType,
-                                                     *source);
     return success();
   }
 };

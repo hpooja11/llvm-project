@@ -16,6 +16,7 @@
 #include "mlir/Dialect/Bufferization/Transforms/Transforms.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
@@ -200,8 +201,8 @@ struct OneShotBufferizePass
       : options(options) {}
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<bufferization::BufferizationDialect, memref::MemRefDialect>();
+    registry.insert<bufferization::BufferizationDialect, memref::MemRefDialect,
+                    scf::SCFDialect>();
   }
 
   void runOnOperation() override {
